@@ -1,0 +1,1231 @@
+---
+title: "Cleaning & Wrangling"
+format: html
+execute:
+  cache: false       # disables caching
+  eval: false        # optional: only enable when ready to run
+---
+
+
+## Background
+
+## Objectives
+
+## Traits 
+
+-   Mid season aboveground biomass
+-   Relative Growth Rate Height
+-   Relative Growth Rate Volume
+-   Maximum Height
+-   Photosynthetic Rate, A
+-   stomatal conductance gs
+-   Instantaneous WUE
+-   Leaf Nitrogen
+-   C:N
+-   Intrinsic WUE 
+-   Leaf Mass Area
+-   Leaf Area
+-   Date of first flower
+-   Root biomass
+-   Root:shoot ratio
+-   Root diameter
+-   Specific root length
+-   Total root length
+-   Root nitrogen
+-   End of season biomass
+
+## Setup
+
+```{r}
+#| message: false
+#| warning: false
+#| echo: false
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(viridis)
+library(lme4)
+library(LeafArea)
+#install.packages("naniar")
+library(naniar)
+library(lubridate)
+library(stringr)
+```
+
+## Climate & Soil
+
+```{r}
+#| eval: false
+soil_A <- read_csv(here::here("data/z6B02090 29Aug25-1126_A-E_All.csv"), skip = 3)
+soil_F <- read_csv(here::here("data/z6B02089 29Aug25-1131_F-J_All.csv"), skip = 3)
+colnames(soil_A) <- c("Timestamp", "Precip_C_mm", "Precip_C_rate","Shelter_E","Shelter_D","Shelter_C","Shelter_B","Shelter_A","Batt_per_A","Batt_volt_A")
+colnames(soil_F) <- c("Timestamp", "Precip_H_mm", "Precip_H_rate","Shelter_J","Shelter_I","Shelter_H","Shelter_G","Shelter_F","Batt_per_F","Batt_volt_F")
+
+soil_AJ <- full_join(soil_A, soil_F, by = join_by(Timestamp))
+str(soil_AJ)
+soil_AJ$Timestamp <- as_datetime(soil_AJ$Timestamp, format = "%m/%d/%y %H:%M")
+soil_AJ$Shelter_E <- as.numeric(soil_AJ$Shelter_E)
+soil_AJ$Shelter_D <- as.numeric(soil_AJ$Shelter_D)
+soil_AJ$Shelter_J <- as.numeric(soil_AJ$Shelter_J)
+  
+soil_AJ_long <- soil_AJ %>% 
+  pivot_longer(cols = c(Shelter_A, Shelter_B, Shelter_C, Shelter_D, Shelter_E, Shelter_F, Shelter_G, Shelter_H, Shelter_I, Shelter_J),
+               names_to = "Shelter")
+shelter_key <- read_csv(here::here("data/Shelter Key.csv"))
+
+soil_AJ_long_trt <- left_join(soil_AJ_long,shelter_key,by=join_by("Shelter"))
+
+soil_AJ_long_trt$Month <- format(soil_AJ_long_trt$Timestamp,"%B")
+soil_AJ_long_trt$Month_n <- as.numeric(format(soil_AJ_long_trt$Timestamp,"%m"))
+soil_AJ_long_trt$Year <- as.numeric(format(soil_AJ_long_trt$Timestamp,"%Y"))
+
+str(soil_AJ_long_trt)
+soil_22_23 <- soil_AJ_long_trt %>% 
+  filter(Timestamp > "2022-11-01 00:00:00" & Timestamp < "2023-05-31 23:00:00")
+soil_23_24 <- soil_AJ_long_trt %>% 
+  filter(Timestamp > "2023-11-01 00:00:00" & Timestamp < "2024-05-31 23:00:00")
+soil_24_25 <- soil_AJ_long_trt %>% 
+  filter(Timestamp > "2024-11-01 00:00:00" & Timestamp < "2025-05-31 23:00:00")
+
+str(soil_22_23)
+
+soil_summary_22_23_m <- soil_22_23 %>% 
+  group_by(Month, Month_n, Year, Treatment) %>% 
+  summarise(sm_avg = mean(value, na.rm = TRUE),
+            .groups = "drop") %>% 
+  distinct() %>% 
+  select(
+    Month,
+    Year,
+    Treatment,
+    sm_avg,
+    Month_n
+  )
+
+soil_summary_22_23 <- soil_22_23 %>% 
+  group_by(Treatment) %>% 
+  summarise(sm_avg = mean(value, na.rm = TRUE),
+            Month = "All",
+            Year = 2023,
+            Month_n = 13) %>% 
+  select(
+    Month,
+    Year,
+    Treatment,
+    sm_avg,
+    Month_n
+  )
+
+soil_summary_23_24_m <- soil_23_24 %>% 
+  group_by(Month, Month_n, Year, Treatment) %>% 
+  summarise(sm_avg = mean(value, na.rm = TRUE),
+            .groups = "drop") %>%  
+  distinct() %>% 
+  select(
+    Month,
+    Year,
+    Treatment,
+    sm_avg,
+    Month_n
+  )
+
+soil_summary_23_24 <- soil_23_24 %>% 
+  group_by(Treatment) %>% 
+  summarise(sm_avg = mean(value, na.rm = TRUE),
+            Month = "All",
+            Year = 2024,
+            Month_n = 13) %>% 
+  select(
+    Month,
+    Year,
+    Treatment,
+    sm_avg,
+    Month_n
+  )
+
+soil_summary_24_25_m <- soil_24_25 %>% 
+  group_by(Month, Month_n, Year, Treatment) %>% 
+  summarise(sm_avg = mean(value, na.rm = TRUE),
+            .groups = "drop") %>% 
+  distinct() %>% 
+  select(
+    Month,
+    Year,
+    Treatment,
+    sm_avg,
+    Month_n
+  )
+soil_summary_24_25 <- soil_24_25 %>% 
+  group_by(Treatment) %>% 
+  summarise(sm_avg = mean(value, na.rm = TRUE),
+            Month = "All",
+            Year = 2025,
+            Month_n = 13) %>% 
+  select(
+    Month,
+    Year,
+    Treatment,
+    sm_avg,
+    Month_n
+  )
+
+sm_summary <- rbind(soil_summary_22_23_m,
+                    soil_summary_22_23,
+                    soil_summary_23_24,
+                    soil_summary_23_24_m,
+                    soil_summary_24_25,
+                    soil_summary_24_25_m)
+
+sm_summary_wide <- sm_summary %>% 
+  arrange(Year,Month_n) %>% 
+  pivot_wider(names_from = Treatment,
+              values_from = sm_avg)
+
+write_csv(sm_summary_wide, here::here("data/USDA_Drought_sm_summary.csv"))
+
+```
+
+## Mid-Season Aboveground biomass
+
+```{r}
+agb <- read_csv(here::here("data/Aboveground Biomass_2024.csv"))
+# 513 observations, is that right
+# Remove two species in 1
+unique(agb$Sp_Code)
+
+agb <- agb |> 
+  filter(!Sp_Code %in% c("BRODIA+CLAPUR"
+                         , "BRODIA+TORARV"
+                         , "CLAPUR+HYPGLA"
+                         , "ELYCAP+HOLVIR"
+                         , "VICS  + TORA")) |> 
+  mutate(Plot = str_extract(Plant_ID, "^[^.]+"))
+
+# Check sample size per species
+table(agb$Sp_Code)
+```
+
+## Relative Growth Rate
+
+### Clean up dataset
+
+```{r}
+rgr <- read_csv(here::here("data/RGR_2024.csv"))
+
+plots <- read_csv(here::here("data/Plot_info.csv"))
+
+rgr <- rgr %>% 
+  select(
+    Recorder,
+    Date,
+    Month,
+    Plant_ID,
+    Height_cm,
+    Canopy_x_cm,
+    Canopy_y_cm
+  ) %>% 
+  replace_with_na(replace = list(Height_cm = "N/A",
+                                 Canopy_x_cm = "N/A",
+                                 Canopy_y_cm = "N/A")) %>% 
+  mutate(Height_cm = as.numeric(Height_cm),
+         Canopy_x_cm = as.numeric(Canopy_x_cm),
+         Canopy_y_cm = as.numeric(Canopy_y_cm))
+str(rgr)
+which(rgr$Canopy_x_cm == "N/A")
+
+# Extract species code from ID
+deconstruct <- function(name) {
+  starts_with_23 <- substring(name,1,2) == "23"
+  
+  Age <- ifelse(starts_with_23,2,1)
+  Sp_Code <- ifelse(starts_with_23,
+                    substring(name,7,12),
+                    substring(name,4,9))
+  Plot <- ifelse(starts_with_23,
+                 substring(name,4,5),
+                 substring(name,1,2))
+  out_df <- data.frame(Plant_ID = name, Age, Sp_Code,Plot, stringsAsFactors = FALSE)
+  return(out_df)
+}
+out <- deconstruct(unique(rgr$Plant_ID))
+unique(out$Plot)
+str(out)
+str(rgr)
+
+# Extract plot, shelter letter from ID, add in block and population
+rgr2 <- inner_join(rgr,out, by=join_by(Plant_ID)) 
+rgr3 <- inner_join(rgr2,plots, by=join_by(Plot)) 
+
+unique(rgr3$Sp_Code)
+
+unique(rgr3$Shelter)
+
+unique(rgr3$Plot)
+
+# Find gaps, investigate
+
+incomplete_rows <- rgr3[,c("Plant_ID","Month","Height_cm","Canopy_x_cm","Canopy_y_cm")]
+incomplete_rows_2 <- incomplete_rows[!complete.cases(incomplete_rows),]
+incomplete_rows_2 <- incomplete_rows_2[rowSums(is.na(incomplete_rows_2)) < 3,] # 3 for the three measurements -- if there are any rows with Height but not canopy, for example
+
+# Investigate three odd balls
+
+# Find and investigate outliers
+# Good job for interns
+# Find average and standard deviation for each species, each growth variable (make area first), per population per month
+str(rgr3)
+rgr3$area <- rgr3$Canopy_x_cm*rgr3$Canopy_y_cm
+
+str(rgr3)
+
+rgr_avgs <- rgr3 %>% 
+  group_by(Sp_Code,
+           Month,
+           Treatment,
+           Population,
+           Age) %>% 
+  mutate(ht_avg = mean(Height_cm, na.rm = TRUE),
+            ht_sd = sd(Height_cm, na.rm = TRUE),
+            area_avg = mean(area, na.rm = TRUE),
+            area_sd = sd(area, na.rm = TRUE),
+            x_avg = mean(Canopy_x_cm, na.rm = TRUE),
+            x_sd = sd(Canopy_x_cm, na.rm = TRUE),
+            y_avg = mean(Canopy_y_cm, na.rm = TRUE),
+            y_sd = sd(Canopy_y_cm, na.rm = TRUE)) %>% 
+  select(Plant_ID,
+         Sp_Code,
+         Month,
+         Age,
+         Treatment,
+         Population,
+         Height_cm,
+         ht_avg,
+         ht_sd,
+         area,
+         area_avg,
+         area_sd,
+         Canopy_x_cm,
+         Canopy_y_cm,
+         x_avg,
+         x_sd,
+         y_avg,
+         y_sd)
+
+rgr_avgs <- rgr_avgs[complete.cases(rgr_avgs),]
+
+rgr_avgs <- rgr_avgs %>% 
+  mutate(ht_max = ht_avg + 3*ht_sd,
+         ht_min = ht_avg - 3*ht_sd,
+         area_max = area_avg + 3*area_sd,
+         area_min = area_avg - 3*area_sd,
+         x_max = x_avg + 3*x_sd,
+         x_min = x_avg - 3*x_sd,
+         y_max = y_avg + 3*y_sd,
+         y_min = y_avg - 3*y_sd)
+
+ht_outliers <-rgr_avgs[which(rgr_avgs$Height_cm > rgr_avgs$ht_max | rgr_avgs$Height_cm < rgr_avgs$ht_min),c("Plant_ID","Sp_Code","Month","Population", "Treatment", "Height_cm","ht_avg","ht_sd","ht_min","ht_max")]
+
+area_outliers <- rgr_avgs[which(rgr_avgs$area > rgr_avgs$area_max | rgr_avgs$area < rgr_avgs$area_min),c("Plant_ID","Sp_Code","Month","Population", "Treatment", "area","area_avg","area_sd","area_min","area_max")]
+
+x_outliers <- rgr_avgs[which(rgr_avgs$Canopy_x_cm > rgr_avgs$x_max | rgr_avgs$Canopy_x_cm < rgr_avgs$x_min),c("Plant_ID","Sp_Code","Month","Population", "Treatment", "Canopy_x_cm","x_avg","x_sd","x_min","x_max")]
+
+y_outliers <- rgr_avgs[which(rgr_avgs$Canopy_y_cm > rgr_avgs$y_max | rgr_avgs$Canopy_y_cm < rgr_avgs$y_min),c("Plant_ID","Sp_Code","Month","Population", "Treatment", "Canopy_y_cm","y_avg","y_sd","y_min","y_max")]
+
+## No outliers for 3 SD from mean, investigate blanks
+
+# remove everything except plots and rgr3
+rm(area_outliers
+   , ht_outliers
+   , incomplete_rows
+   , incomplete_rows_2
+   , out
+   , rgr
+   , rgr2
+   , rgr_avgs
+   , x_outliers
+   , y_outliers)
+```
+
+### Create variables
+
+```{r}
+# Calculate canopy volume (height x canopy area)
+head(rgr3)
+rgr3$volume <- rgr3$Height_cm*rgr3$Canopy_x_cm*rgr3$Canopy_y_cm
+rgr3$Date <- as.Date(rgr3$Date, tryFormats = "%m/%d/%y")
+str(rgr3)
+
+# Separate by metric
+
+rgr_h_wide <- rgr3 %>% 
+  select(Plant_ID,
+         Date,
+         Month,
+         Height_cm) %>% 
+  filter(!is.na(Height_cm)) %>%
+  pivot_wider(id_cols = Plant_ID,
+              names_from = Month,
+              values_from = c(Date, Height_cm)) %>% 
+  mutate(rgr_h_FM = (log(Height_cm_March)-log(Height_cm_February))/as.numeric((Date_March-Date_February)),
+         rgr_h_MA = (log(Height_cm_April)-log(Height_cm_March))/as.numeric((Date_April-Date_March)),
+         rgr_h_AM = (log(Height_cm_May)-log(Height_cm_April))/as.numeric((Date_May-Date_April)),
+         rgr_h_MJ = (log(Height_cm_June)-log(Height_cm_May))/as.numeric((Date_June-Date_May)))
+
+rgr_v_wide <- rgr3 %>% 
+  select(Plant_ID,
+         Date,
+         Month,
+         volume) %>% 
+  filter(!is.na(volume)) %>%
+  pivot_wider(id_cols = Plant_ID,
+              names_from = Month,
+              values_from = c(Date, volume)) %>% 
+  mutate(rgr_v_FM = (log(volume_March)-log(volume_February))/as.numeric((Date_March-Date_February)),
+         rgr_v_MA = (log(volume_April)-log(volume_March))/as.numeric((Date_April-Date_March)),
+         rgr_v_AM = (log(volume_May)-log(volume_April))/as.numeric((Date_May-Date_April)),
+         rgr_v_MJ = (log(volume_June)-log(volume_May))/as.numeric((Date_June-Date_May)))
+  
+# Join all three together but only keep rgrs, full join by Plant_ID
+
+rgr_hv <- full_join(rgr_h_wide,rgr_v_wide,by = join_by(Plant_ID))
+
+rgr_hv2 <- rgr_hv %>% 
+  select(
+    Plant_ID,
+    rgr_h_FM,
+    rgr_h_MA,
+    rgr_h_AM,
+    rgr_h_MJ,
+    rgr_v_FM,
+    rgr_v_MA,
+    rgr_v_AM,
+    rgr_v_MJ
+  )
+
+## Wooooo we did it!
+## Now just need to address outliers and re-run
+## For now you're done!
+
+rm(rgr_h_wide
+   , rgr_hv
+   , rgr_v_wide
+   , rgr3)
+```
+
+### Exploratory Graphs
+
+```{r}
+str(rgr_hv2)
+
+rgr_hv2_a <- rgr_hv2 %>% 
+  mutate(Plot = substr(Plant_ID, start = 1, stop = 2)) %>% 
+  filter(!Plot == "23") %>% 
+  mutate(Sp_Code = substr(Plant_ID, start = 4, stop = 9)) %>% 
+  mutate(Sp_Code = 
+    case_when(
+      Sp_Code == "AMSINK" ~ "AMSMEN",
+      TRUE ~ Sp_Code))
+unique(rgr_hv2_a$Sp_Code)
+
+rgr_hv2_f <- left_join(rgr_hv2_a,plots,by = join_by(Plot))
+
+spp <- read_csv(here::here("data/Species_Codes.csv"))
+unique(spp$Sp_Code)
+# merge with species data
+rgr_hv2_full <- left_join(rgr_hv2_f,spp,by = join_by(Sp_Code))
+
+ggplot(rgr_hv2_full, aes(x=Treatment, y=rgr_h_FM, fill = Native_Status)) +
+  geom_violin() +
+  stat_summary(fun = "mean",
+               geom = "point",
+               color = "red")
+
+ggplot(rgr_hv2_full, aes(x=Treatment, y=rgr_h_MA, fill = Native_Status)) +
+  geom_violin() +
+ stat_summary(fun = "mean",
+               geom = "point",
+               color = "red")
+
+ggplot(rgr_hv2_full, aes(x=Treatment, y=rgr_h_AM, fill = Native_Status)) +
+  geom_violin() +
+ stat_summary(fun = "mean",
+               geom = "point",
+               color = "red")
+
+ggplot(rgr_hv2_full, aes(x=Treatment, y=rgr_v_FM, fill = Native_Status)) +
+  geom_violin() +
+ stat_summary(fun = "mean",
+               geom = "point",
+               color = "red")
+
+ggplot(rgr_hv2_full, aes(x=Treatment, y=rgr_v_MA, fill = Native_Status)) +
+  geom_violin() +
+ stat_summary(fun = "mean",
+               geom = "point",
+               color = "red")
+
+ggplot(rgr_hv2_full, aes(x=Treatment, y=rgr_v_AM, fill = Native_Status)) +
+  geom_violin() +
+ stat_summary(fun = "mean",
+               geom = "point",
+               color = "red")
+
+
+library(tidyverse)
+
+# Convert to long format
+rgr_hv2_full_long <- rgr_hv2_full %>%
+  pivot_longer(
+    cols = c(rgr_h_FM, rgr_h_MA, rgr_h_AM, rgr_v_FM, rgr_v_MA, rgr_v_AM),
+    names_to = "Variable",
+    values_to = "Value"
+  )
+
+variable_labels <- c(
+  rgr_h_FM = "Height Feb-Mar",
+  rgr_h_MA = "Height Mar-Apr",
+  rgr_h_AM = "Height Apr-May",
+  rgr_v_FM = "Volume Feb-Mar",
+  rgr_v_MA = "Volume Mar-Apr",
+  rgr_v_AM = "Volume Apr-May"
+)
+
+# Plot
+ggplot(rgr_hv2_full_long, aes(x = Treatment,
+                    y = Value
+  #                  , fill = Population
+                    )) +
+  geom_boxplot(position = position_dodge(width = 0.8)) +
+  facet_wrap(~Variable, scales = "free_y", ncol = 3,
+             labeller = labeller(Variable = variable_labels)
+             ) +
+ # scale_fill_manual(values = c("red","orange","yellow","green","blue")) +
+  labs(x = "Treatment",
+       y = "Value"
+    #   , fill = "Population"
+       ) +
+  theme_bw() +
+  theme(
+    strip.background = element_rect(fill = "grey90"),
+    legend.position = "top"
+  )
+
+ggsave(here::here("figs/rgr_trt.jpg"))
+
+variables <- c("rgr_h_FM", "rgr_h_MA", "rgr_h_AM", "rgr_v_FM", "rgr_v_MA", "rgr_v_AM")
+
+for(v in variables){
+
+  dat <- rgr_hv2_full %>%
+    dplyr::select(Treatment, Precip_mm, all_of(v)) %>%
+    filter(
+      !is.na(.data[[v]]),
+      !is.nan(.data[[v]]),
+      is.finite(.data[[v]]),
+      !is.na(Treatment),
+      !is.na(Precip_mm)
+    )
+
+  cat("\n", v, "- n =", nrow(dat), "\n")
+
+  model <- aov(as.formula(
+    paste(v, "~ Treatment * Precip_mm")
+  ), data = dat)
+
+  print(summary(model))
+}
+
+
+
+```
+Drought treatment usually significant for all months in height and volume.
+
+### Select Reference times
+One predictive variable of allometric slope might be relative growth rate timing and/or maximum relative growth rate.
+
+## Photosynthetic Rate
+
+### Read in & bind
+
+```{r}
+#| warning: false
+#| eval: false
+# how to tell it the header and which rows to skip
+# how to read through the filenames in a certain folder and make a list and then read those in 1 by 1
+
+licor_files <- list.files("/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/licor")
+licor_files[4]
+?read_csv
+trial <- read_csv(licor_files[4], skip = 1, col_select = "obs":"gtc")
+
+lic <- list() # creates a list
+for (k in 1:length(licor_files)){
+ lic[[k]] <- read_csv(licor_files[k], skip = 1, col_select = "obs":"gtc")
+}
+
+# from Ch 1 code, not sure what it does but it brings up an error
+#lic <- lapply(lic, function(tbl) {
+#  tbl$WUE <- as.numeric(tbl$WUE)
+#  return(tbl)
+#})
+
+licor <- bind_rows(lic)
+licor <- licor %>% 
+  filter(!is.na(obs))
+
+write_csv(licor, "licor.csv")
+
+```
+### Chamber Leaf Scans
+
+Now I need to bring in Licor leaf area csv and join. Also need to double check numbers for each species.
+
+GALPAR, Holvir, miccal not working -- fixed, just needed to adjust minimum size.
+
+```{r}
+#| echo: false
+#| warning: false
+#| eval: false
+
+aircar = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/AIRCAR",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+aircar<-aircar$summary
+
+amsmen = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/AMSMEN",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+amsmen<-amsmen$summary
+
+avebar = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/AVEBAR",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+avebar<-avebar$summary
+
+avefat = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/AVEFAT",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+avefat<-avefat$summary
+
+broare = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/BROARE",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+broare<-broare$summary
+
+brodia = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/BRODIA",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+brodia<-brodia$summary
+
+brohor = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/BROHOR",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+brohor<-brohor$summary
+
+bromad = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/BROMAD",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+bromad<-bromad$summary
+
+caucou = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/CAUCOU",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+caucou<-caucou$summary
+
+cenmel = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/CENMEL",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+cenmel<-cenmel$summary
+
+clapur = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/CLAPUR",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+clapur<-clapur$summary
+
+corfil = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/CORFIL",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+corfil<-corfil$summary
+
+dancal = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/DANCAL",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+dancal<-dancal$summary
+
+daupus = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/DAUPUS",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+daupus<-daupus$summary
+
+elycap = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/ELYCAP",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+elycap<-elycap$summary
+
+erocic = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/EROCIC",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+erocic<-erocic$summary
+
+esccal = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/ESCCAL",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+esccal<-esccal$summary
+
+
+galpar = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/GALPAR", 
+                distance.pixel = 355, 
+                known.distance = 3,
+                low.size = 0.005,
+                log = TRUE)
+          #      save.image = TRUE)
+galpar<-galpar$summary
+
+gerdis = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/GERDIS",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+gerdis<-gerdis$summary
+
+holvir = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/HOLVIR", 
+                distance.pixel = 355, 
+                known.distance = 3, 
+                low.size = 0.005,
+                log = TRUE)
+                # save.image = TRUE)
+holvir<-holvir$summary
+
+hypgla = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/HYPGLA",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+hypgla<-hypgla$summary
+
+lupbic = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/LUPBIC",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+lupbic<-lupbic$summary
+
+lupmic = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/LUPMIC",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+lupmic<-lupmic$summary
+
+lupsuc = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/LUPSUC",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+lupsuc<-lupsuc$summary
+
+madgra = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/MADGRA",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+madgra<-madgra$summary
+
+miccal = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/MICCAL", 
+                distance.pixel = 355, 
+                known.distance = 3, 
+                low.size = 0.0005,
+                log = TRUE)
+                # save.image = TRUE)
+miccal<-miccal$summary
+
+mirmul = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/MIRMUL", 
+                distance.pixel = 355, 
+                known.distance = 3, 
+                low.size = 0.005,
+                log = TRUE)
+             #   save.image = TRUE)
+mirmul<-mirmul$summary
+
+phatan = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/PHATAN",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+phatan<-phatan$summary
+
+plaere = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/PLAERE",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+plaere<-plaere$summary
+
+planot = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/PLANOT",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+planot<-planot$summary
+
+salcol = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/SALCOL",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+salcol<-salcol$summary
+
+sanbip = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/SANBIP",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+sanbip<-sanbip$summary
+
+stipul = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/STIPUL",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+stipul<-stipul$summary
+
+torarv = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/TORARV",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+torarv<-torarv$summary
+
+trihir = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/TRIHIR",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+trihir<-trihir$summary
+
+vicsat = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought_frameworks/Licor Leaf Area copy/VICSAT",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+vicsat<-vicsat$summary
+
+# missing galpar, miccal, holvir
+leaf_licor_area <- rbind(aircar,
+                         amsmen,
+                         avebar,
+                         avefat,
+                         broare,
+                         brodia,
+                         brohor,
+                         bromad,
+                         caucou,
+                         cenmel,
+                         clapur,
+                         corfil,
+                         dancal,
+                         daupus,
+                         elycap,
+                         erocic,
+                         esccal,
+                         galpar,
+                         gerdis,
+                         holvir,
+                         hypgla,
+                         lupbic,
+                         lupmic,
+                         lupsuc,
+                         madgra,
+                         miccal,
+                         mirmul,
+                         phatan,
+                         plaere,
+                         planot,
+                         salcol,
+                         sanbip,
+                         stipul,
+                         torarv,
+                         trihir,
+                         vicsat)
+
+leaf_licor_area$sample <- as.character(leaf_licor_area$sample)
+leaf_licor_area$sample[which(nchar(leaf_licor_area$sample) < 18)]
+
+# order samples by nchar
+# make a sample short column that removes 23 and replacement plots and makes their own column
+# and a no licor column
+
+leaf_licor_area$nchar <- nchar(leaf_licor_area$sample)
+
+leaf_licor_area <- leaf_licor_area %>% 
+  arrange(nchar)
+unique(leaf_licor_area$nchar)
+
+# break up dataset into sample name types and create new columns: sample short, perennial
+
+# then merge with a no licor list 
+leaf_18 <- leaf_licor_area %>% 
+  filter(nchar == 18)
+leaf_18$sample_short <- leaf_18$sample
+leaf_18$perennial <- 0
+leaf_18$plot_replace <- NA
+
+# these are samples from 2023
+leaf_20 <- leaf_licor_area %>% 
+  filter(nchar == 20)
+leaf_20$sample_short <- substr(leaf_20$sample,3,20)
+leaf_20$perennial <- 1
+leaf_20$plot_replace <- NA
+
+# these are non-2023 samples with replacement plots
+leaf_21 <- leaf_licor_area %>% 
+  filter(nchar == 21)
+leaf_21$sample_short <- paste0(
+  substr(leaf_21$sample, 1, 9),
+  "_",
+  substr(leaf_21$sample, 14,21)
+)
+leaf_21$perennial <- 0
+leaf_21$plot_replace <- substr(leaf_21$sample, 11,12)
+
+# 2023 samples with a replacement plot
+leaf_23 <- leaf_licor_area %>% 
+  filter(nchar == 23)
+leaf_23$sample_short <- paste0(
+  substr(leaf_23$sample, 3, 11),
+  "_",
+  substr(leaf_23$sample, 16,23)
+)
+leaf_23$perennial <- 1
+leaf_23$plot_replace <- substr(leaf_23$sample, 13,14)
+
+leaf_licor <- rbind(leaf_18,
+                         leaf_20,
+                         leaf_21,
+                         leaf_23)
+str(leaf_licor)
+
+# merge with dataset of plant ids with no licor
+nolicors <- read_csv("leaf_are_no_licor.csv")
+
+leaf_licor_area <- left_join(leaf_licor, nolicors, by=join_by(sample, sample_short, plot_replace))
+length(unique(leaf_licor_area$sample))
+
+# check for duplicates
+leaf_licor$sample[which(duplicated(leaf_licor$sample))]
+
+leaf_licor_area$sample[which(duplicated(leaf_licor_area$sample))]
+
+write_csv(leaf_licor_area, "leaf_licor_area.csv")
+```
+
+### Merge licor & images
+
+Double check that the numbers of values per species aligns with number of images per species folder. -- All good
+
+Then merge with Licor dataset by plant ID.
+
+Started cleaning up files for merging, resolving errors, etc. Four dates of licor dataframe have all NAs for plant id and WUE, these came from the daisy licor -- plant id is in the original file but didn't carry over either in csv step or binding step. 
+
+- Plant id can be found in other "plant_id" column, not "plant id". But doesn't explain missing WUE.
+
+WUE is a user defined variable that we didn't put in Daisy, so I'll need to calculate it manually.
+
+Below chunk creates an error list. Rand throught it once (error list 1) and fixed errors in licor.csv and licor leaf area. csv, but not originals.
+
+Return here for further cleaning and prepping.
+
+```{r}
+# Read in combined data from above
+leaf_licor_area <- read_csv(here::here("data/leaf_licor_area.csv"))
+head(leaf_licor_area)
+# 745 samples
+licor <- read_csv(here::here("data/licor.csv"))
+head(licor)
+# 1058 samples
+
+# check to see if any samples are too short or accidentally contain periods
+leaf_licor_area$sample[which(nchar(leaf_licor_area$sample) < 18)]
+
+# Make date column for licor data
+licor$Date <- as.Date(substr(licor$date, start=1, stop=10))
+str(licor$Date)
+
+# Make date column for licor leaf area
+leaf_licor_area$Date <- as.Date(substr(leaf_licor_area$sample_short, start=11, stop=18), "%Y%m%d")
+str(leaf_licor_area$Date)
+
+# make perennial column chracter
+leaf_licor_area$perennial <- as.character(leaf_licor_area$perennial)
+
+# separate plant ID from date and add periods to plant id
+leaf_licor_area$Plant_ID <- substr(leaf_licor_area$sample_short, start=1,stop=9)
+leaf_licor_area$Plant_ID <- paste0(
+  substr(leaf_licor_area$Plant_ID, 1, 2),
+  ".",
+  substr(leaf_licor_area$Plant_ID, 3, nchar(leaf_licor_area$Plant_ID))
+)
+leaf_licor_area$Plant_ID
+
+leaf_licor_area$Plant_ID <- paste0(
+  substr(leaf_licor_area$Plant_ID, 1, 9),
+  ".",
+  substr(leaf_licor_area$Plant_ID, 10, nchar(leaf_licor_area$Plant_ID))
+)
+leaf_licor_area$Plant_ID
+
+# I think I need to split the 23s and replacements and then r-bind
+# Add 23 to the front of two year old perennials
+lf_lic_area_23 <- leaf_licor_area %>% 
+  filter(perennial == "1")
+
+lf_lic_area_23$Plant_ID <- paste0(
+  "23",
+  ".",
+  substr(lf_lic_area_23$Plant_ID, 1, nchar(lf_lic_area_23$Plant_ID))
+)
+lf_lic_area_23$Plant_ID
+
+lf_lic_area_na <- leaf_licor_area %>% 
+  filter(perennial == 0)
+
+leaf_licor_area <- rbind(lf_lic_area_23, lf_lic_area_na)
+
+# add "- replacement plot"
+lf_lic_area_rep <- leaf_licor_area %>% 
+  filter(!is.na(plot_replace))
+
+lf_lic_area_rep$Plant_ID <- paste0(
+  substr(lf_lic_area_rep$Plant_ID, 1, nchar(lf_lic_area_rep$Plant_ID)),
+  "-",
+  substr(lf_lic_area_rep$plot_replace, 1, 2)
+)
+lf_lic_area_rep$Plant_ID
+
+lf_lic_area_na <- leaf_licor_area %>% 
+  filter(is.na(plot_replace))
+
+leaf_licor_area <- rbind(lf_lic_area_rep, lf_lic_area_na)
+
+# drop "no licor" samples
+leaf_licor <- leaf_licor_area %>% 
+  filter(is.na(no_licor))
+
+# align plant_ids and check for errors
+leaf_licor_ids <- leaf_licor %>% 
+  mutate(Plant_ID_lf = Plant_ID) %>% 
+  select(Date,
+         Plant_ID,
+         Plant_ID_lf)
+
+licor$Plant_ID <- toupper(licor$`plant id`)
+
+licor_ids <- licor %>% 
+  mutate(Plant_ID_lic = Plant_ID) %>% 
+  select(date,
+         Plant_ID,
+         Plant_ID_lic)
+
+error_check <- full_join(leaf_licor_ids,licor_ids, by= join_by(Plant_ID))
+list <- error_check[which(!complete.cases(error_check)),]
+
+# LEFT OFF HERE
+# Impute missing leaf area with licor leaf area averages from treatment x pop x species
+
+
+list2 <- left_join(list,no_lf,by= join_by(Plant_ID))
+list3 <- list2 %>% 
+  filter(is.na(no_lf))
+# YAY I FINALLY DID IT
+# write_csv(list, "error_list_4.csv")
+
+# capitalize Licor plant id
+licor$Plant_ID <- toupper(licor$`plant id`)
+
+# merge with licor leaf area
+licor2 <- full_join(licor,leaf_licor,by=c("Plant_ID" = "Plant_ID"))
+
+# merge no leaf samples
+licor3 <- left_join(licor2,no_lf,by=c("Plant_ID" = "Plant_ID"))
+licor3 <- licor3 %>% 
+  arrange(no_lf)
+```
+
+
+```{r}
+# No average and fill in missing leaf area values
+
+# multiply focal data by leaf area fraction
+licor2$leaf_ratio <- 6/licor2$total.leaf.area
+licor2 <- licor2 %>% 
+  filter(!is.na(total.leaf.area)) %>% # filter NAs for now
+  mutate(WUE_adj = leaf_ratio*WUE,
+         E_adj = leaf_ratio*as.numeric(E),
+         A_adj = leaf_ratio*as.numeric(A),
+         Ci_adj = leaf_ratio*as.numeric(Ci),
+         gsw_adj = leaf_ratio*as.numeric(gsw))
+str(licor2)
+
+# remove licor data with gsw below threshold
+licor2[which(licor2$gsw_adj < 0.03),]
+
+# There are values from September 2020???? investigate
+# Weirdly this file 2023-04-30-0922_BRODIA_39.csv has the date at Sep 2020, some glitch. will need to fix
+# September 23, 2020
+
+# test for licor outliers by species, population, and treatment
+
+
+
+# average licor data by plant_id
+
+
+
+# extract species and plot from plant id
+
+```
+
+
+## Nitrogen
+
+```{r}
+cn <- read_csv(here::here("data/cn.csv"))
+str(cn)
+cn$Plant_ID <- cn$`Sample ID`
+cn$N <- cn$`%N`
+
+cn_a <- cn %>% 
+  mutate(Plot = substr(Plant_ID, start = 1, stop = 2)) %>% 
+  filter(!Plot == "23") %>% 
+  mutate(Sp_Code = substr(Plant_ID, start = 4, stop = 9)) 
+# %>% 
+#  mutate(Sp_Code = 
+#    case_when(
+#      Sp_Code == "AMSINK" ~ "AMSMEN",
+ #     TRUE ~ Sp_Code))
+unique(cn_a$Sp_Code)
+
+cn_f <- left_join(cn_a,plots,by = join_by(Plot))
+
+spp <- read_csv(here::here("Species Codes.csv"))
+unique(spp$Sp_Code)
+# merge with species data
+cn_full <- left_join(cn_f,spp,by = join_by(Sp_Code))
+
+ggplot(cn_full, aes(x=Treatment, y=N, fill = Native_Status)) +
+  geom_violin() 
+
+ggplot(cn_full, aes(x=Treatment, y=N, fill = Population)) +
+  geom_violin() 
+
+ggplot(cn_full, aes(x=Treatment, y=N, fill = Growth_Habit)) +
+  geom_violin()
+
+library(tidyverse)
+
+# Remove NAs
+cn_full <-  cn_full %>% 
+  filter(!is.na(N)) %>% 
+  filter(!is.na(Treatment)) %>% 
+  filter(!is.na(Population))
+  
+# Plot
+ggplot(cn_full, aes(x = Treatment,
+                    y = N
+                    )) +
+  geom_boxplot(position = position_dodge(width = 0.8)) +
+  facet_wrap(~Population, scales = "free_y", ncol = 3
+ #            , labeller = labeller(Variable = variable_labels)
+             ) +
+ # scale_fill_manual(values = c("red","orange","yellow","green","blue")) +
+  labs(x = "Treatment",
+       y = "%N"
+    #   , fill = "Population"
+       ) +
+  theme_bw() +
+  theme(
+    strip.background = element_rect(fill = "grey90"),
+    legend.position = "top"
+  )
+
+ggsave("N_trt.jpg")
+
+# Fit two-way ANOVA
+model <- aov(N ~ Treatment * Population, data = cn_full)
+
+# View results
+summary(model)
+
+for(v in variables){
+
+  dat <- cn_full %>%
+    dplyr::select(Treatment, Precip_mm, all_of(v)) %>%
+    filter(
+      !is.na(.data[[v]]),
+      !is.nan(.data[[v]]),
+      is.finite(.data[[v]]),
+      !is.na(Treatment),
+      !is.na(Precip_mm)
+    )
+
+  cat("\n", v, "- n =", nrow(dat), "\n")
+
+  model <- aov(as.formula(
+    paste(v, "~ Treatment * Precip_mm")
+  ), data = dat)
+
+  print(summary(model))
+}
+```
+## Leaf Mass Area
+
+## Leaf Area
+
+## Phenology
+
+## Roots
+-   Root biomass
+-   Root:shoot ratio
+-   Root diameter
+-   Specific root length
+-   Total root length
+-   Root nitrogen
+
+## End of season biomass
+
+
