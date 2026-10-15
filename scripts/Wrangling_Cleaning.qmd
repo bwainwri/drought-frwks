@@ -974,6 +974,7 @@ Return here for further cleaning and prepping.
 # Read in combined data from above
 leaf_licor_area <- read_csv(here::here("data/leaf_licor_area.csv"))
 head(leaf_licor_area)
+
 # 745 samples
 licor <- read_csv(here::here("data/licor.csv"))
 head(licor)
@@ -1063,33 +1064,91 @@ licor_ids <- licor %>%
 
 error_check <- full_join(leaf_licor_ids,licor_ids, by= join_by(Plant_ID))
 list <- error_check[which(!complete.cases(error_check)),]
+str(list)
 
-# LEFT OFF HERE
-# Impute missing leaf area with licor leaf area averages from treatment x pop x species
+# So we have list, which we can reduce to just Plant IDs, break up plant IDs into plot and species
+library(tidyverse)
 
+parse_plant_id <- function(pid) {
+  # Split on "."
+  parts <- str_split(pid, "\\.", simplify = FALSE)
+  
+  map_dfr(parts, function(p) {
+    # Drop any leading numeric-only segment (e.g., "23" = year prefix)
+    p <- p[!str_detect(p, "^[0-9]+$")]
+    # Now p[1] = plot (e.g., "A1"), p[2] = species (e.g., "SPECOD"), p[3] = individual
+    tibble(
+      Plot       = p[1],
+      Sp_Code    = p[2],
+      individual = p[3]
+    )
+  })
+}
 
-list2 <- left_join(list,no_lf,by= join_by(Plant_ID))
-list3 <- list2 %>% 
-  filter(is.na(no_lf))
-# YAY I FINALLY DID IT
-# write_csv(list, "error_list_4.csv")
+# Use it on any dataframe:
+list <- list %>%
+  bind_cols(parse_plant_id(.$Plant_ID))
+
+# bring in plot data which gives us treatment and population
+list_plot <- left_join(list,plots,by=join_by("Plot"))
+# create a SpeciesxPopulationxTreatment column
+list_plot$Sp_Pop_Trt <- paste0(list_plot$Sp_Code,list_plot$Population,list_plot$Treatment)
+
+# Then take leaf_licor and do the same
+leaf_licor <- leaf_licor %>%
+  bind_cols(parse_plant_id(.$Plant_ID))
+leaf_licor_plot <- left_join(leaf_licor,plots,by=join_by("Plot"))
+# create a SpeciesxPopulationxTreatment column 
+leaf_licor_plot$Sp_Pop_Trt <- paste0(leaf_licor_plot$Sp_Code,leaf_licor_plot$Population,leaf_licor_plot$Treatment)
+# generate averages per species x population x treatment
+leaf_licor_avgs <- leaf_licor_plot |> 
+  group_by(Sp_Pop_Trt) |> 
+  summarise(area_mean = mean(total.leaf.area))
+
+# left join with list, averages
+list_plot_fill <- left_join(list_plot,leaf_licor_avgs, by=join_by("Sp_Pop_Trt"))
+
+# rbind list with averages to leaf-licor
+leaf_licor <- leaf_licor |> 
+  select(
+    Plant_ID
+    , total.leaf.area
+    , Plot
+    , Sp_Code
+  )
+
+list_plot_fill <- list_plot_fill |> 
+  mutate(total.leaf.area= area_mean) |> 
+  select(
+    Plant_ID
+    , total.leaf.area
+    , Plot
+    , Sp_Code
+  )
+
+leaf_licor_fill <- rbind(leaf_licor,list_plot_fill)
+leaf_licor_fill <- leaf_licor_fill |> 
+  distinct()
+# left-join with licor, leaf_licor
 
 # capitalize Licor plant id
 licor$Plant_ID <- toupper(licor$`plant id`)
 
+str(leaf_licor_fill)
+
 # merge with licor leaf area
-licor2 <- full_join(licor,leaf_licor,by=c("Plant_ID" = "Plant_ID"))
+licor2 <- left_join(licor,leaf_licor_fill,by=c("Plant_ID" = "Plant_ID"))
 
 # merge no leaf samples
-licor3 <- left_join(licor2,no_lf,by=c("Plant_ID" = "Plant_ID"))
-licor3 <- licor3 %>% 
-  arrange(no_lf)
+#licor3 <- left_join(licor2,no_lf,by=c("Plant_ID" = "Plant_ID"))
+#licor3 <- licor3 %>% 
+#  arrange(no_lf)
+
+
 ```
 
 
 ```{r}
-# No average and fill in missing leaf area values
-
 # multiply focal data by leaf area fraction
 licor2$leaf_ratio <- 6/licor2$total.leaf.area
 licor2 <- licor2 %>% 
@@ -1100,24 +1159,37 @@ licor2 <- licor2 %>%
          Ci_adj = leaf_ratio*as.numeric(Ci),
          gsw_adj = leaf_ratio*as.numeric(gsw))
 str(licor2)
+summary(licor2)
 
 # remove licor data with gsw below threshold
-licor2[which(licor2$gsw_adj < 0.03),]
+licor2 <- licor2 |> 
+  filter(gsw_adj > 0.02999)
 
 # There are values from September 2020???? investigate
 # Weirdly this file 2023-04-30-0922_BRODIA_39.csv has the date at Sep 2020, some glitch. will need to fix
 # September 23, 2020
 
-# test for licor outliers by species, population, and treatment
-
-
-
-# average licor data by plant_id
-
-
-
 # extract species and plot from plant id
+licor2 <- left_join(licor2,plots, by=join_by("Plot"))
+licor2$Sp_Pop_Trt <- paste0(licor2$Sp_Code,licor2$Population,licor2$Treatment)
 
+# test for licor outliers by species, population, and treatment for A only, still need to manually calculate WUE for some
+licor_sum <- licor2 |> 
+  group_by(Sp_Pop_Trt) |> 
+  summarise(a_adj_av = mean(A_adj),
+            a_adj_sd = sd(A_adj)) |> 
+  mutate(a_min = a_adj_av - (3*a_adj_sd),
+         a_max = a_adj_av + (3*a_adj_sd))
+licor_sum <- licor_sum[which(complete.cases(licor_sum)),]
+
+licor_outlier_check <- left_join(licor2,licor_sum,by=join_by("Sp_Pop_Trt"))
+
+licor_outliers <- licor_outlier_check[which(licor_outlier_check$A_adj > licor_outlier_check$a_max | licor_outlier_check$A_adj < licor_outlier_check$a_min),c("Plant_ID","A","A_adj","a_adj_av","a_adj_sd","a_min","a_max")]
+
+# LEFT OFF HERE #
+
+# Not sure what to do about these outliers. They all seem legit except CLAPURs images seem shriveled which may be inflating it's A
+# manually calculate WUE
 ```
 
 
