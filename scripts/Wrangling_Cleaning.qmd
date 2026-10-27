@@ -1145,51 +1145,232 @@ licor2 <- left_join(licor,leaf_licor_fill,by=c("Plant_ID" = "Plant_ID"))
 #  arrange(no_lf)
 
 
+summary(licor2)
+
+licor2$total.leaf.area[which(is.na(licor2$total.leaf.area))] <- 0.44
+# no leaf area for 23.DANCAL in drought. Just use control average of 0.44
+write_csv(licor2, here::here("data/licor2.csv"))
+
 ```
 
 
 ```{r}
-# multiply focal data by leaf area fraction
-licor2$leaf_ratio <- 6/licor2$total.leaf.area
-licor2 <- licor2 %>% 
-  filter(!is.na(total.leaf.area)) %>% # filter NAs for now
-  mutate(WUE_adj = leaf_ratio*WUE,
-         E_adj = leaf_ratio*as.numeric(E),
-         A_adj = leaf_ratio*as.numeric(A),
-         Ci_adj = leaf_ratio*as.numeric(Ci),
-         gsw_adj = leaf_ratio*as.numeric(gsw))
-str(licor2)
-summary(licor2)
 
-# remove licor data with gsw below threshold
-licor2 <- licor2 |> 
-  filter(gsw_adj > 0.02999)
+# =============================================================================
+# LI-6800 QC: leaf-area correction + flagging of problematic values
+#
+# Input:   licor2       one row per logged observation
+# Output:  licor_qc     all rows, area-corrected values (*_c) + flag columns
+#          licor_clean  "exclude" rows removed, iWUE masked where unreliable
+#          review_table rows needing a look, with reasons
+#
+# Corrected columns end in _c (A_c, E_c, Emm_c, gsw_c, gtc_c, Ci_c, Pci_c,
+# CiCa_c, WUE_c). Original columns are left untouched.
+# =============================================================================
 
-# There are values from September 2020???? investigate
-# Weirdly this file 2023-04-30-0922_BRODIA_39.csv has the date at Sep 2020, some glitch. will need to fix
-# September 23, 2020
+# This script corrects A, E, gsw, gtc, Ci and iWUE for the actual leaf area in licor_qc.R. It then sorts each observation into “ok,” “review,” or “exclude” and lists the reason for each flag.
 
-# extract species and plot from plant id
-licor2 <- left_join(licor2,plots, by=join_by("Plot"))
-licor2$Sp_Pop_Trt <- paste0(licor2$Sp_Code,licor2$Population,licor2$Treatment)
+# How the correction works: A, E, and total conductance scale exactly by 6 / actual area, so those are rescaled directly. gsw, gtc, and Ci are then recomputed with the LI-6800 equations. The boundary-layer terms are back-calculated from each row’s own output, so the correction keeps whatever settings the machine used. Section 3 checks that the equations reproduce the machine’s logged Ci and WUE. Both differences should be near zero; if they aren’t, stop and let me know.
 
-# test for licor outliers by species, population, and treatment for A only, still need to manually calculate WUE for some
-licor_sum <- licor2 |> 
-  group_by(Sp_Pop_Trt) |> 
-  summarise(a_adj_av = mean(A_adj),
-            a_adj_sd = sd(A_adj)) |> 
-  mutate(a_min = a_adj_av - (3*a_adj_sd),
-         a_max = a_adj_av + (3*a_adj_sd))
-licor_sum <- licor_sum[which(complete.cases(licor_sum)),]
+# Things to know before running it:
+  
+#   Check what area was entered on each machine. The script assumes both machines used 6 cm². If the second machine had a different area entered, the correction factor for those rows will be wrong.
+# Leaves larger than 6 cm² are capped at 6, not scaled. The chamber can only hold 6 cm² of leaf, so the script treats an area over 6 as a full chamber and flags it for review.
+# Leaves under 1 cm² are flagged. The correction multiplies their values more than 6×, which also magnifies measurement noise.
+# iWUE will barely change after correction. A and gsw both scale with area, so the area mostly cancels out of the ratio. A and gsw themselves will change a lot.
+# Thresholds are set for C3 plants. They’re grouped at the top of the script and are reasonable for Bromus. Adjust them if you have C4 species.
 
-licor_outlier_check <- left_join(licor2,licor_sum,by=join_by("Sp_Pop_Trt"))
+# The flag_summary table shows whether flags cluster on the second machine. Rows flagged “review” stay in licor_clean until you’ve looked at them in review_table.
 
-licor_outliers <- licor_outlier_check[which(licor_outlier_check$A_adj > licor_outlier_check$a_max | licor_outlier_check$A_adj < licor_outlier_check$a_min),c("Plant_ID","A","A_adj","a_adj_av","a_adj_sd","a_min","a_max")]
+library(dplyr)
+library(tidyr)
+library(ggplot2)
 
-# LEFT OFF HERE #
+# ---- 1. Settings (edit these) -----------------------------------------------
 
-# Not sure what to do about these outliers. They all seem legit except CLAPURs images seem shriveled which may be inflating it's A
-# manually calculate WUE
+# Leaf area (cm^2) the LI-6800 used in its calculations. If the second machine
+# had a different area entered, make this a per-row column instead.
+area_entered <- 6
+
+thr <- list(
+  area_min    = 1,     # cm^2; below this the correction (>6x) amplifies noise
+  A_max       = 40,    # µmol m-2 s-1; implausibly high for most C3 leaves
+  gsw_max     = 1.5,   # mol m-2 s-1; implausibly high
+  gsw_min_wue = 0.02,  # mol m-2 s-1; below this A/gsw is unreliable
+  wue_max     = 250,   # µmol mol-1; implausible for C3
+  CiCa_min    = 0.2,   # very low Ci/Ca with positive A suggests leak/error (C3)
+  CiCa_max    = 1.0,   # Ci > Ca with positive A is physically impossible
+  rep_dev     = 0.30,  # relative deviation of an obs from its plant's median A
+  mad_z       = 3.5    # robust z-score cutoff for species-level outliers
+)
+
+# ---- 2. Leaf-area correction ------------------------------------------------
+# A, E and gtw are all divided by leaf area in the LI-6800 equations, so they
+# scale exactly by (area_entered / actual_area). gsw, gtc and Ci are then
+# recomputed from the corrected values. The boundary-layer terms are
+# back-calculated from each row's own output, so the correction keeps whatever
+# boundary-layer conductance and stomatal ratio the machine used.
+
+licor2 <- read.csv(here::here("data/licor2.csv"))
+
+licor_qc <- licor2 %>%
+  mutate(
+    WUE_source = if_else(is.na(WUE), "manual (2nd machine)", "machine"),
+    
+    leaf_area = case_when(
+      is.na(total.leaf.area) | total.leaf.area <= 0 ~ NA_real_,
+      total.leaf.area > area_entered ~ area_entered,  # leaf larger than aperture
+      TRUE ~ total.leaf.area
+    ),
+    area_factor = area_entered / leaf_area,
+    
+    # Back-calculated terms from the machine's own output
+    r_bw  = 1 / gtw - 1 / gsw,        # boundary-layer term, water
+    r_bc  = 1 / gtc - 1.6 / gsw,      # boundary-layer term, CO2
+    P_kPa = 1000 * Pca / Ca,          # chamber pressure
+    
+    # Fluxes scale directly with 1/area
+    A_c   = A   * area_factor,
+    E_c   = E   * area_factor,
+    Emm_c = E_c * 1000,
+    gtw_c = gtw * area_factor,
+    
+    # Recompute conductances and Ci
+    gsw_den = 1 / gtw_c - r_bw,
+    gsw_c   = if_else(gsw_den > 0, 1 / gsw_den, NA_real_),
+    gtc_c   = 1 / (1.6 / gsw_c + r_bc),
+    Ci_c    = ((gtc_c - E_c / 2) * Ca - A_c) / (gtc_c + E_c / 2),
+    Pci_c   = Ci_c * P_kPa / 1000,
+    CiCa_c  = Ci_c / Ca,
+    
+    # Intrinsic WUE (A/gsw) for every row, including the missing ones
+    WUE_c   = A_c / gsw_c
+  )
+
+# ---- 3. Sanity checks: do the equations reproduce the machine's output? -----
+# Both differences should be tiny (rounding only). If not, stop and check.
+
+ci_diff  <- with(licor_qc, ((gtc - E / 2) * Ca - A) / (gtc + E / 2) - Ci)
+wue_diff <- with(licor_qc, A / gsw - WUE)
+cat("Max |Ci reconstructed - Ci logged|: ",
+    round(max(abs(ci_diff), na.rm = TRUE), 3), "ppm\n")
+cat("Max |A/gsw - WUE logged|:           ",
+    round(max(abs(wue_diff), na.rm = TRUE), 3), "\n")
+
+# ---- 4. Replicate stability and species-level outliers ----------------------
+
+safe_z <- function(x) {
+  m <- mad(x, na.rm = TRUE)
+  if (is.na(m) || m == 0) return(rep(NA_real_, length(x)))
+  (x - median(x, na.rm = TRUE)) / m
+}
+
+licor_qc <- licor_qc %>%
+  group_by(Plant_ID, Date) %>%
+  mutate(
+    n_obs   = n(),
+    A_med   = median(A_c, na.rm = TRUE),
+    rep_dev = abs(A_c - A_med) / pmax(abs(A_med), 1)  # floor avoids blow-up near 0
+  ) %>%
+  group_by(Sp_Code) %>%
+  mutate(
+    z_A   = safe_z(A_c),
+    z_WUE = safe_z(WUE_c)
+  ) %>%
+  ungroup()
+
+# ---- 5. Flags ---------------------------------------------------------------
+# h_ = hard flags: technical failure or physically impossible -> exclude
+# s_ = soft flags: unusual but possibly real biology          -> review
+
+licor_qc <- licor_qc %>%
+  mutate(
+    # Hard
+    h_area_missing      = is.na(leaf_area),
+    h_correction_failed = !is.na(leaf_area) & is.na(gsw_c),
+    h_Ci_negative       = !is.na(Ci_c) & Ci_c < 0,
+    h_Ci_gt_Ca          = !is.na(CiCa_c) & CiCa_c > thr$CiCa_max & A_c > 0,
+    
+    # Soft
+    s_area_capped  = !is.na(total.leaf.area) & total.leaf.area > area_entered,
+    s_area_small   = !is.na(leaf_area) & leaf_area < thr$area_min,
+    s_A_negative   = !is.na(A_c) & A_c < 0,
+    s_A_high       = !is.na(A_c) & A_c > thr$A_max,
+    s_E_negative   = !is.na(E_c) & E_c < 0,
+    s_gsw_low      = !is.na(gsw_c) & gsw_c < thr$gsw_min_wue,
+    s_gsw_high     = !is.na(gsw_c) & gsw_c > thr$gsw_max,
+    s_WUE_high     = !is.na(WUE_c) & WUE_c > thr$wue_max,
+    s_CiCa_low     = !is.na(CiCa_c) & CiCa_c < thr$CiCa_min & A_c > 0,
+    s_unstable_rep = n_obs > 1 & !is.na(rep_dev) & rep_dev > thr$rep_dev,
+    s_outlier_A    = !is.na(z_A)   & abs(z_A)   > thr$mad_z,
+    s_outlier_WUE  = !is.na(z_WUE) & abs(z_WUE) > thr$mad_z
+  )
+
+hard_flags <- grep("^h_", names(licor_qc), value = TRUE)
+soft_flags <- grep("^s_", names(licor_qc), value = TRUE)
+
+list_flags <- function(df, cols) {
+  m <- as.matrix(df[cols])
+  apply(m, 1, function(r) paste(cols[r], collapse = "; "))
+}
+
+licor_qc$hard_reasons <- list_flags(licor_qc, hard_flags)
+licor_qc$soft_reasons <- list_flags(licor_qc, soft_flags)
+
+licor_qc <- licor_qc %>%
+  mutate(qc_status = case_when(
+    hard_reasons != "" ~ "exclude",
+    soft_reasons != "" ~ "review",
+    TRUE               ~ "ok"
+  ))
+
+# ---- 6. Summaries -----------------------------------------------------------
+
+# How many rows are ok / review / exclude, by data source
+licor_qc %>% count(WUE_source, qc_status) %>% print()
+
+# Which flags fire, and whether they cluster on one machine
+flag_summary <- licor_qc %>%
+  group_by(WUE_source) %>%
+  summarise(across(all_of(c(hard_flags, soft_flags)), sum), .groups = "drop") %>%
+  pivot_longer(-WUE_source, names_to = "flag", values_to = "n") %>%
+  pivot_wider(names_from = WUE_source, values_from = n) %>%
+  arrange(flag)
+print(flag_summary, n = Inf)
+
+# Rows to inspect by hand
+review_table <- licor_qc %>%
+  filter(qc_status != "ok") %>%
+  select(Plant_ID, Sp_Code, Plot, Date, obs, WUE_source, qc_status,
+         total.leaf.area, A, A_c, gsw_c, Ci_c, CiCa_c, WUE_c,
+         hard_reasons, soft_reasons) %>%
+  arrange(desc(qc_status), Plant_ID, obs)
+print(review_table, n = 50)
+write.csv(review_table, here::here("data/licor_review_table.csv"), row.names = FALSE)
+
+# ---- 7. Clean dataset -------------------------------------------------------
+# Drops hard-flagged rows and masks iWUE where gsw is too low for the ratio
+# to be meaningful (A and gsw themselves are kept). Soft-flagged rows stay in;
+# decide on those after reviewing, and run analyses with and without them.
+
+licor_clean <- licor_qc %>%
+  filter(qc_status != "exclude") %>%
+  mutate(WUE_clean = if_else(gsw_c < thr$gsw_min_wue, NA_real_, WUE_c))
+
+write.csv(licor_clean,here::here("data/licor_clean.csv"))
+
+# ---- 8. Quick visual check --------------------------------------------------
+
+ggplot(licor_qc, aes(gsw_c, A_c, colour = qc_status, shape = WUE_source)) +
+  geom_point(alpha = 0.7) +
+  scale_colour_manual(values = c(ok = "grey50", review = "orange",
+                                 exclude = "red")) +
+  labs(x = expression(g[sw]~"(mol m"^-2~"s"^-1*", area-corrected)"),
+       y = expression(A~"(µmol m"^-2~"s"^-1*", area-corrected)"),
+       colour = "QC status", shape = "Source") +
+  theme_bw()
+
+
 ```
 
 
@@ -1214,7 +1395,7 @@ unique(cn_a$Sp_Code)
 
 cn_f <- left_join(cn_a,plots,by = join_by(Plot))
 
-spp <- read_csv(here::here("Species Codes.csv"))
+spp <- read_csv(here::here("data/Species_Codes.csv"))
 unique(spp$Sp_Code)
 # merge with species data
 cn_full <- left_join(cn_f,spp,by = join_by(Sp_Code))
@@ -1255,36 +1436,412 @@ ggplot(cn_full, aes(x = Treatment,
     legend.position = "top"
   )
 
-ggsave("N_trt.jpg")
+ggsave(here::here("figs/N_trt.jpg"))
 
 # Fit two-way ANOVA
 model <- aov(N ~ Treatment * Population, data = cn_full)
 
 # View results
 summary(model)
-
-for(v in variables){
-
-  dat <- cn_full %>%
-    dplyr::select(Treatment, Precip_mm, all_of(v)) %>%
-    filter(
-      !is.na(.data[[v]]),
-      !is.nan(.data[[v]]),
-      is.finite(.data[[v]]),
-      !is.na(Treatment),
-      !is.na(Precip_mm)
-    )
-
-  cat("\n", v, "- n =", nrow(dat), "\n")
-
-  model <- aov(as.formula(
-    paste(v, "~ Treatment * Precip_mm")
-  ), data = dat)
-
-  print(summary(model))
-}
 ```
 ## Leaf Mass Area
+
+```{r}
+#| eval: false
+#| echo: false
+
+aircar = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/AIRCAR",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+aircar<-aircar$summary
+
+amsmen = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/AMSMEN",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE)
+amsmen<-amsmen$summary
+
+avebar = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/AVEBAR",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE)
+avebar<-avebar$summary
+
+avefat = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/AVEFAT",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE)
+avefat<-avefat$summary
+
+broare = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/BROARE",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE)
+broare<-broare$summary
+
+brodia = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/BRODIA",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE)
+brodia<-brodia$summary
+
+brohor = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/BROHOR",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE)
+brohor<-brohor$summary
+
+bromad = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/BROMAD",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+bromad<-bromad$summary
+
+caucou = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/CAUCOU",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE)
+caucou<-caucou$summary
+
+cenmel = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/CENMEL",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE)
+cenmel<-cenmel$summary
+
+clapur = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/CLAPUR",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+clapur<-clapur$summary
+
+corfil = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/CORFIL",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE)
+corfil<-corfil$summary
+
+dancal = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/DANCAL",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+dancal<-dancal$summary
+
+daupus = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/DAUPUS",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE)
+daupus<-daupus$summary
+
+elycap = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/ELYCAP",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE)
+elycap<-elycap$summary
+
+erocic = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/EROCIC",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+erocic<-erocic$summary
+
+esccal = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/EROCIC",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+esccal<-esccal$summary
+
+galpar = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/GALPAR", 
+                distance.pixel = 355, 
+                known.distance = 3,
+                low.size = 0.005,
+                log = TRUE)
+          #      save.image = TRUE)
+galpar<-galpar$summary
+
+gerdis = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/GERDIS",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE)
+gerdis<-gerdis$summary
+
+holvir = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/HOLVIR", 
+                distance.pixel = 355, 
+                known.distance = 3, 
+                low.size = 0.005,
+                log = TRUE)
+                # save.image = TRUE)
+holvir<-holvir$summary
+
+hypgla = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/HYPGLA",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE)
+hypgla<-hypgla$summary
+
+lupbic = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/LUPBIC",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+lupbic<-lupbic$summary
+
+lupmic = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/LUPMIC",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE)
+lupmic<-lupmic$summary
+
+lupsuc = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/LUPSUC",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE)
+lupsuc<-lupsuc$summary
+
+madgra = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/MADGRA",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE)
+madgra<-madgra$summary
+
+miccal = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/MICCAL", 
+                distance.pixel = 355, 
+                known.distance = 3, 
+                low.size = 0.005,
+                log = TRUE)
+             #   save.image = TRUE)
+miccal<-miccal$summary
+
+mirmul = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/MIRMUL", 
+                distance.pixel = 355, 
+                known.distance = 3, 
+                low.size = 0.005,
+                log = TRUE)
+             #   save.image = TRUE)
+mirmul<-mirmul$summary
+
+phatan = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/PHATAN",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE)
+phatan<-phatan$summary
+
+plaere = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/PLAERE",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+plaere<-plaere$summary
+
+planot = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/PLANOT",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+planot<-planot$summary
+
+salcol = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/SALCOL",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+salcol<-salcol$summary
+
+sanbip = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/SANBIP",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+sanbip<-sanbip$summary
+
+stipul = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/STIPUL",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+stipul<-stipul$summary
+
+torarv = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/TORARV",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE)
+torarv<-torarv$summary
+
+trihir = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/TRIHIR",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE,
+              low.size = 0.005)
+trihir<-trihir$summary
+
+vicsat = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/VICSAT",
+              distance.pixel = 355,
+              known.distance = 3,
+              log = TRUE)
+vicsat<-vicsat$summary
+
+# missing galpar, miccal, holvir
+lma_lf_area <- rbind(aircar,
+                         amsmen,
+                         avebar,
+                         avefat,
+                         broare,
+                         brodia,
+                         brohor,
+                         bromad,
+                         caucou,
+                         cenmel,
+                         clapur,
+                         corfil,
+                         dancal,
+                         daupus,
+                         elycap,
+                         erocic,
+                         esccal,
+                         galpar,
+                         gerdis,
+                         holvir,
+                         hypgla,
+                         lupbic,
+                         lupmic,
+                         lupsuc,
+                         madgra,
+                         miccal,
+                         mirmul,
+                         phatan,
+                         plaere,
+                         planot,
+                         salcol,
+                         sanbip,
+                         stipul,
+                         torarv,
+                         trihir,
+                         vicsat)
+
+write_csv(lma_lf_area, here::here("data/LMA_lf_area.csv"))
+
+
+```
+
+
+```{r}
+
+lf_area <- read_csv(here::here("data/LMA_lf_area.csv"))
+# There may be errors in this -- not sure how to check
+
+## Extract plant id, species, plot
+lf_area$Date <- as.Date(substr(lf_area$sample, start=11, stop=18), "%Y%m%d")
+
+# separate plant ID from same and add periods to plant id
+lf_area$Plant_ID <- substr(lf_area$sample, start=1,stop=9)
+lf_area$Plant_ID <- paste0(
+  substr(lf_area$Plant_ID, 1, 2),
+  ".",
+  substr(lf_area$Plant_ID, 3, nchar(lf_area$Plant_ID))
+)
+lf_area$Plant_ID
+
+lf_area$Plant_ID <- paste0(
+  substr(lf_area$Plant_ID, 1, 9),
+  ".",
+  substr(lf_area$Plant_ID, 10, nchar(lf_area$Plant_ID))
+)
+lf_area$Plant_ID
+
+lf_area$Sp_Code <- substr(lf_area$Plant_ID,4,9)
+
+
+# merge with plot and species info
+#lf_area2 <- left_join(lf_area,plots, by = join_by(Plot))
+#lf_area3 <- left_join(lf_area2,spp, by = join_by(Sp_Code))
+
+# Now merge with leaf mass and calculate LMA
+mass <- read_csv(here::here("data/Leaf Mass_2023_20231009.csv"))
+head(mass)
+
+plots <- read_csv(here::here("data/Plot_info.csv"))
+spp <- read_csv(here::here("data/Species Codes.csv"))
+
+# Remove perennials
+mass_a <- mass %>% 
+  filter(!Sp_Code %in% c("CORFIL","ESCCAL","STIPUL","DANCAL"))
+
+# 696 masses
+# 691 leaf areas
+
+# I want to know how many observations per species for each dataset, start there
+
+library(dplyr)
+ct_area <- lf_area %>% count(Sp_Code)
+ct_mass <- mass_a %>% count(Sp_Code)
+
+join_check <- full_join(lf_area,mass_a,by=join_by("Plant_ID"))
+join_check %>% filter(is.na(total.leaf.area))
+join_check %>% filter(is.na(Dry_leaf_mass_g))
+# Missing:
+# H1.AVEBAR.2 area
+# H3.BRODIA.2 Mass
+# G8.VICSAT.2 area
+
+str(lf_area)
+str(mass_a)
+
+LMA <- full_join(lf_area,mass_a, by = join_by(Plant_ID, Sp_Code == Sp_Code))
+# LMA is measured in g/m^2
+
+LMA$area_m2 <- LMA$total.leaf.area/10000
+LMA$lma_g_m2 <- LMA$area_m2/LMA$Dry_leaf_mass_g
+
+summary(LMA)
+LMA[which(is.na(LMA$Dry_leaf_mass_g)),"Plant_ID"]
+LMA[which(is.na(LMA$total.leaf.area)),"Plant_ID"]
+# interpolate LMA based on spp x population averages
+# First make sure they are NA so they don't effect averages
+LMA$lma_g_m2[which(LMA$Plant_ID == "H1.AVEBAR.2")] <- NA
+LMA$lma_g_m2[which(LMA$Plant_ID == "H3.BRODIA.2")] <- NA
+LMA$lma_g_m2[which(LMA$Plant_ID == "G8.VICSAT.2")] <- NA
+# H1.AVEBAR.2 area
+# H3.BRODIA.2 Mass
+# G8.VICSAT.2 area
+LMA[which(is.na(LMA$lma_g_m2)),"Plant_ID"]
+
+# merge with plot and species info
+LMA$Plot <- substr(LMA$Plant_ID,1,2)
+LMA2 <- left_join(LMA,plots, by = join_by(Plot))
+LMA <- left_join(LMA2,spp, by = join_by(Sp_Code))
+
+pop_spp_avg <- LMA %>% 
+  group_by(Sp_Code,Population) %>% 
+  summarise(avg_lma = mean(lma_g_m2,na.rm = TRUE))
+
+pop <- LMA[which(LMA$Plant_ID == "H1.AVEBAR.2"),"Population"]
+avg <- pop_spp_avg[which(pop_spp_avg$Sp_Code == "AVEBAR" & pop_spp_avg$Population == "SEDG"),"avg_lma"]
+LMA[which(LMA$Plant_ID == "H1.AVEBAR.2"),"lma_g_m2"] <- avg
+
+pop <- LMA[which(LMA$Plant_ID == "H3.BRODIA.2"),"Population"]
+avg <- pop_spp_avg[which(pop_spp_avg$Sp_Code == "BRODIA" & pop_spp_avg$Population == "WWP"),"avg_lma"]
+LMA[which(LMA$Plant_ID == "H3.BRODIA.2"),"lma_g_m2"] <- avg
+
+pop <- LMA[which(LMA$Plant_ID == "G8.VICSAT.2"),"Population"]
+avg <- pop_spp_avg[which(pop_spp_avg$Sp_Code == "VICSAT" & pop_spp_avg$Population == "BORR"),"avg_lma"]
+LMA[which(LMA$Plant_ID == "G8.VICSAT.2"),"lma_g_m2"] <- avg
+
+LMA[which(is.na(LMA$lma_g_m2)),"Plant_ID"]
+
+# Check for duplicates
+LMA[which(duplicated(LMA$Plant_ID)),]
+
+
+```
+
+
 
 ## Leaf Area
 
