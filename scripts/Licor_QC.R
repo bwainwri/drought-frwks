@@ -207,4 +207,7 @@ ggplot(licor_qc, aes(gsw_c, A_c, colour = qc_status, shape = WUE_source)) +
   geom_point(alpha = 0.7) +
   scale_colour_manual(values = c(ok = "grey50", review = "orange",
                                  exclude = "red")) +
-  labs(x = expression(g[sw]~"(mol m"^-2~"s"^-1*", area
+  labs(x = expression(g[sw]~"(mol m"^-2~"s"^-1*", area-corrected)"),
+       y = expression(A~"(µmol m"^-2~"s"^-1*", area-corrected)"),
+       colour = "QC status", shape = "Source") +
+  theme_bw()
