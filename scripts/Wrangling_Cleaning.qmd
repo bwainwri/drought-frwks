@@ -1571,7 +1571,8 @@ aircar<-aircar$summary
 amsmen = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/AMSMEN",
               distance.pixel = 355,
               known.distance = 3,
-              log = TRUE)
+              log = TRUE,
+              low.size = 0.005)
 amsmen<-amsmen$summary
 
 avebar = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/AVEBAR",
@@ -1601,7 +1602,8 @@ brodia<-brodia$summary
 brohor = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/BROHOR",
               distance.pixel = 355,
               known.distance = 3,
-              log = TRUE)
+              log = TRUE,
+              low.size = 0.005)
 brohor<-brohor$summary
 
 bromad = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/BROMAD",
@@ -1620,7 +1622,8 @@ caucou<-caucou$summary
 cenmel = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/CENMEL",
               distance.pixel = 355,
               known.distance = 3,
-              log = TRUE)
+              log = TRUE,
+              low.size = 0.005)
 cenmel<-cenmel$summary
 
 clapur = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/CLAPUR",
@@ -1633,7 +1636,8 @@ clapur<-clapur$summary
 corfil = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/CORFIL",
               distance.pixel = 355,
               known.distance = 3,
-              log = TRUE)
+              log = TRUE,
+              low.size = 0.005)
 corfil<-corfil$summary
 
 dancal = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/DANCAL",
@@ -1646,13 +1650,15 @@ dancal<-dancal$summary
 daupus = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/DAUPUS",
               distance.pixel = 355,
               known.distance = 3,
-              log = TRUE)
+              log = TRUE,
+              low.size = 0.005)
 daupus<-daupus$summary
 
 elycap = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/ELYCAP",
               distance.pixel = 355,
               known.distance = 3,
-              log = TRUE)
+              log = TRUE,
+              low.size = 0.005)
 elycap<-elycap$summary
 
 erocic = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/EROCIC",
@@ -1662,7 +1668,7 @@ erocic = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projec
               low.size = 0.005)
 erocic<-erocic$summary
 
-esccal = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/EROCIC",
+esccal = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/ESCCAL",
               distance.pixel = 355,
               known.distance = 3,
               log = TRUE,
@@ -1719,13 +1725,14 @@ lupsuc<-lupsuc$summary
 madgra = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/MADGRA",
               distance.pixel = 355,
               known.distance = 3,
-              log = TRUE)
+              log = TRUE,
+              low.size = 0.005)
 madgra<-madgra$summary
 
 miccal = run.ij(set.directory = "/Users/brookewainwright/Documents/GitHub_Projects/drought-frwks/data/LMA Leaf Images/MICCAL", 
                 distance.pixel = 355, 
                 known.distance = 3, 
-                low.size = 0.005,
+                low.size = 0.0005,
                 log = TRUE)
              #   save.image = TRUE)
 miccal<-miccal$summary
@@ -1980,8 +1987,6 @@ parse_leaf_area_id <- function(df, id_col = "sample") {
 lf_area <- parse_leaf_area_id(lf_area)
 summary(lf_area)
 
-## LEFT OFF HERE ##
-
 # Now merge with leaf mass and calculate LMA
 mass <- read_csv(here::here("data/Leaf Mass_2024.csv"))
 head(mass)
@@ -1990,20 +1995,32 @@ str(mass)
 plots <- read_csv(here::here("data/Plot_info.csv"))
 spp <- read_csv(here::here("data/Species_Codes.csv"))
 
-# 771 masses
-# 718 leaf areas
+# 769 masses
+# 732 leaf areas
 
 # I want to know how many observations per species for each dataset, start there
 
 library(dplyr)
 ct_area <- lf_area %>% count(Sp_Code)
-ct_mass <- mass %>% count(Sp_Code)
+ct_mass <- mass %>% count(SPECIES)
+
+mass[which(duplicated(mass$Plant_ID)),]
+# two masses for 23.I2.ESCCAL.1 0.031 and 0.0096. It should be 0.031. 0.0096 belongs to a much smaller leaf
+lf_area[which(duplicated(lf_area$plant_key)),]
+
 ```
 
 ```{r}
-join_check <- full_join(lf_area,mass_a,by=join_by("Plant_ID"))
-join_check %>% filter(is.na(total.leaf.area))
-join_check %>% filter(is.na(Dry_leaf_mass_g))
+str(mass)
+str(lf_area)
+lf_area$Plant_ID <- lf_area$plant_key
+
+join_check <- full_join(lf_area,mass,by=join_by("Plant_ID"))
+missing_area <- join_check %>% filter(is.na(total.leaf.area))
+write.csv(missing_area, here::here("data/missing_areas.csv"))
+missing_mass <- join_check %>% filter(is.na(Dry_leaf_mass_g))
+write.csv(missing_mass, here::here("data/missing_mass.csv"))
+
 # Missing:
 # H1.AVEBAR.2 area
 # H3.BRODIA.2 Mass

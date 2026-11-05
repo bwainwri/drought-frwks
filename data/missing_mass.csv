@@ -1,0 +1,3 @@
+"","sample","parse_ok","cohort","one_year_old","structure","plot_num","Plot","Sp_Code","genus_code","epithet_code","individual","leaf_subsample","is_subsample","substitute","source_plot","sample_rep","is_resample","collection_date","notes","has_note","collected_from","plant_key","leaf_key","total.leaf.area","Plant_ID","Recorder","Date","SPECIES","Dry_leaf_mass_g","Notes"
+"1","A4AVEBAR2_20240506",TRUE,NA,FALSE,"A",4,"A4","AVEBAR","AVE","BAR",2,NA,FALSE,FALSE,NA,1,FALSE,2024-05-06,NA,FALSE,"A4","A4.AVEBAR.2","A4.AVEBAR.2_rep1",6.896,"A4.AVEBAR.2",NA,NA,NA,NA,NA
+"2","F8TRIHIR1_20240515",TRUE,NA,FALSE,"F",8,"F8","TRIHIR","TRI","HIR",1,NA,FALSE,FALSE,NA,1,FALSE,2024-05-15,NA,FALSE,"F8","F8.TRIHIR.1","F8.TRIHIR.1_rep1",0.846,"F8.TRIHIR.1",NA,NA,NA,NA,NA
