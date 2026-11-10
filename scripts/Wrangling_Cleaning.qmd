@@ -2021,15 +2021,35 @@ write.csv(missing_area, here::here("data/missing_areas.csv"))
 missing_mass <- join_check %>% filter(is.na(Dry_leaf_mass_g))
 write.csv(missing_mass, here::here("data/missing_mass.csv"))
 
-# Missing:
-# H1.AVEBAR.2 area
-# H3.BRODIA.2 Mass
-# G8.VICSAT.2 area
+# Missing mass:
+# F8.TRIHIR.1 from 5/16/24
+
+# Missing areas:
+# B6.BROHOR.1
+# J5.BROHOR.1
+# J6.BROHOR.1
+# A6.BROMAD.1
+# D4.MICCAL.2
+# F5.MICCAL.1
+# B2.PLAERE.2
+# G5.PLAERE.2
+
+# DEAD NO AREA:
+# H8.BROMAD.2
+# B6.BRODIA.2
+# J5.BRODIA.2
+# B6.BROMAD.2
+# J3.PLAERE.1
+# C1.BROMAD.2
+# A3.GERDIS.2
+
 
 str(lf_area)
-str(mass_a)
+str(mass)
+mass$Sp_Code <- mass$SPECIES
 
-LMA <- full_join(lf_area,mass_a, by = join_by(Plant_ID, Sp_Code == Sp_Code))
+# Conservatively, don't include the missing 16
+LMA <- inner_join(lf_area,mass, by = join_by(Plant_ID, Sp_Code == Sp_Code))
 # LMA is measured in g/m^2
 
 LMA$area_m2 <- LMA$total.leaf.area/10000
@@ -2038,48 +2058,31 @@ LMA$lma_g_m2 <- LMA$area_m2/LMA$Dry_leaf_mass_g
 summary(LMA)
 LMA[which(is.na(LMA$Dry_leaf_mass_g)),"Plant_ID"]
 LMA[which(is.na(LMA$total.leaf.area)),"Plant_ID"]
-# interpolate LMA based on spp x population averages
-# First make sure they are NA so they don't effect averages
-LMA$lma_g_m2[which(LMA$Plant_ID == "H1.AVEBAR.2")] <- NA
-LMA$lma_g_m2[which(LMA$Plant_ID == "H3.BRODIA.2")] <- NA
-LMA$lma_g_m2[which(LMA$Plant_ID == "G8.VICSAT.2")] <- NA
-# H1.AVEBAR.2 area
-# H3.BRODIA.2 Mass
-# G8.VICSAT.2 area
-LMA[which(is.na(LMA$lma_g_m2)),"Plant_ID"]
-
-# merge with plot and species info
-LMA$Plot <- substr(LMA$Plant_ID,1,2)
-LMA2 <- left_join(LMA,plots, by = join_by(Plot))
-LMA <- left_join(LMA2,spp, by = join_by(Sp_Code))
-
-pop_spp_avg <- LMA %>% 
-  group_by(Sp_Code,Population) %>% 
-  summarise(avg_lma = mean(lma_g_m2,na.rm = TRUE))
-
-pop <- LMA[which(LMA$Plant_ID == "H1.AVEBAR.2"),"Population"]
-avg <- pop_spp_avg[which(pop_spp_avg$Sp_Code == "AVEBAR" & pop_spp_avg$Population == "SEDG"),"avg_lma"]
-LMA[which(LMA$Plant_ID == "H1.AVEBAR.2"),"lma_g_m2"] <- avg
-
-pop <- LMA[which(LMA$Plant_ID == "H3.BRODIA.2"),"Population"]
-avg <- pop_spp_avg[which(pop_spp_avg$Sp_Code == "BRODIA" & pop_spp_avg$Population == "WWP"),"avg_lma"]
-LMA[which(LMA$Plant_ID == "H3.BRODIA.2"),"lma_g_m2"] <- avg
-
-pop <- LMA[which(LMA$Plant_ID == "G8.VICSAT.2"),"Population"]
-avg <- pop_spp_avg[which(pop_spp_avg$Sp_Code == "VICSAT" & pop_spp_avg$Population == "BORR"),"avg_lma"]
-LMA[which(LMA$Plant_ID == "G8.VICSAT.2"),"lma_g_m2"] <- avg
-
+# did not include 16 samples with missing area or mass
 LMA[which(is.na(LMA$lma_g_m2)),"Plant_ID"]
 
 # Check for duplicates
 LMA[which(duplicated(LMA$Plant_ID)),]
+str(LMA)
 
+LMA <- LMA |> 
+  select(
+    Plant_ID,
+    Sp_Code,
+    Plot,
+    one_year_old,
+    lma_g_m2, 
+    notes,
+    Notes
+  )
+
+write.csv(LMA, here::here("data/lma.csv"))
 
 ```
 
-
-
 ## Leaf Area
+
+Have Kalie do single leaf area
 
 ## Phenology
 
